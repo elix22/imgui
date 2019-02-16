@@ -741,6 +741,13 @@ bool ImGui::CollapseButton(ImGuiID id, const ImVec2& pos, ImGuiDockNode* dock_no
     return pressed;
 }
 
+ImGuiID ImGui::GetScrollbarID(ImGuiLayoutType direction)
+{
+    ImGuiContext& g = *GImGui;
+    ImGuiWindow* window = g.CurrentWindow;
+    return window->GetID((direction == ImGuiLayoutType_Horizontal) ? "#SCROLLX" : "#SCROLLY");
+}
+
 // Vertical/Horizontal scrollbar
 // The entire piece of code below is rather confusing because:
 // - We handle absolute seeking (when first clicking outside the grab) and relative manipulation (afterward or when clicking inside the grab)
@@ -753,8 +760,8 @@ void ImGui::Scrollbar(ImGuiLayoutType direction)
 
     const bool horizontal = (direction == ImGuiLayoutType_Horizontal);
     const ImGuiStyle& style = g.Style;
-    const ImGuiID id = window->GetID(horizontal ? "#SCROLLX" : "#SCROLLY");
-
+    const ImGuiID id = GetScrollbarID(direction);
+    
     // Render background
     bool other_scrollbar = (horizontal ? window->ScrollbarY : window->ScrollbarX);
     float other_scrollbar_size_w = other_scrollbar ? style.ScrollbarSize : 0.0f;
@@ -765,8 +772,20 @@ void ImGui::Scrollbar(ImGuiLayoutType direction)
         : ImRect(window_rect.Max.x - style.ScrollbarSize, window->Pos.y + border_size, window_rect.Max.x - border_size, window_rect.Max.y - other_scrollbar_size_w - border_size);
     if (!horizontal)
         bb.Min.y += window->TitleBarHeight() + ((window->Flags & ImGuiWindowFlags_MenuBar) ? window->MenuBarHeight() : 0.0f);
-    if (bb.GetWidth() <= 0.0f || bb.GetHeight() <= 0.0f)
+
+    const float bb_height = bb.GetHeight();
+    if (bb.GetWidth() <= 0.0f || bb_height <= 0.0f)
         return;
+
+    // When we are too small, start hiding and disabling the grab (this reduce visual noise on very small window and facilitate using the resize grab)
+    float alpha = 1.0f;
+    if ((direction == ImGuiLayoutType_Vertical) && bb_height < g.FontSize + g.Style.FramePadding.y * 2.0f)
+    {
+        alpha = ImSaturate((bb_height - g.FontSize) / (g.Style.FramePadding.y * 2.0f));
+        if (alpha <= 0.0f)
+            return;
+    }
+    const bool allow_interaction = (alpha >= 1.0f);
 
     int window_rounding_corners;
     if (horizontal)
@@ -798,7 +817,7 @@ void ImGui::Scrollbar(ImGuiLayoutType direction)
     float scroll_max = ImMax(1.0f, win_size_contents_v - win_size_avail_v);
     float scroll_ratio = ImSaturate(scroll_v / scroll_max);
     float grab_v_norm = scroll_ratio * (scrollbar_size_v - grab_h_pixels) / scrollbar_size_v;
-    if (held && grab_h_norm < 1.0f)
+    if (held && allow_interaction && grab_h_norm < 1.0f)
     {
         float scrollbar_pos_v = horizontal ? bb.Min.x : bb.Min.y;
         float mouse_pos_v = horizontal ? g.IO.MousePos.x : g.IO.MousePos.y;
@@ -841,8 +860,8 @@ void ImGui::Scrollbar(ImGuiLayoutType direction)
             *click_delta_to_grab_center_v = clicked_v_norm - grab_v_norm - grab_h_norm*0.5f;
     }
 
-    // Render
-    const ImU32 grab_col = GetColorU32(held ? ImGuiCol_ScrollbarGrabActive : hovered ? ImGuiCol_ScrollbarGrabHovered : ImGuiCol_ScrollbarGrab);
+    // Render grab
+    const ImU32 grab_col = GetColorU32(held ? ImGuiCol_ScrollbarGrabActive : hovered ? ImGuiCol_ScrollbarGrabHovered : ImGuiCol_ScrollbarGrab, alpha);
     ImRect grab_rect;
     if (horizontal)
         grab_rect = ImRect(ImLerp(bb.Min.x, bb.Max.x, grab_v_norm), bb.Min.y, ImMin(ImLerp(bb.Min.x, bb.Max.x, grab_v_norm) + grab_h_pixels, window_rect.Max.x), bb.Max.y);
@@ -2863,8 +2882,9 @@ static int InputTextCalcTextLenAndLineCount(const char* text_begin, const char**
 
 static ImVec2 InputTextCalcTextSizeW(const ImWchar* text_begin, const ImWchar* text_end, const ImWchar** remaining, ImVec2* out_offset, bool stop_on_new_line)
 {
-    ImFont* font = GImGui->Font;
-    const float line_height = GImGui->FontSize;
+    ImGuiContext& g = *GImGui;
+    ImFont* font = g.Font;
+    const float line_height = g.FontSize;
     const float scale = line_height / font->FontSize;
 
     ImVec2 text_size = ImVec2(0,0);
@@ -5114,7 +5134,7 @@ bool ImGui::Selectable(const char* label, bool selected, ImGuiSelectableFlags fl
     }
 
     if (flags & ImGuiSelectableFlags_Disabled) PushStyleColor(ImGuiCol_Text, g.Style.Colors[ImGuiCol_TextDisabled]);
-    RenderTextClipped(bb_inner.Min, bb.Max, label, NULL, &label_size, ImVec2(0.0f,0.0f));
+    RenderTextClipped(bb_inner.Min, bb_inner.Max, label, NULL, &label_size, style.SelectableTextAlign, &bb);
     if (flags & ImGuiSelectableFlags_Disabled) PopStyleColor();
 
     // Automatically close popups
@@ -6346,7 +6366,7 @@ static ImGuiTabItem* ImGui::TabBarTabListPopupButton(ImGuiTabBar* tab_bar)
 // - TabItemEx() [Internal]
 // - SetTabItemClosed()
 // - TabItemCalcSize() [Internal]
-// - TabItemRenderBackground() [Internal]
+// - TabItemBackground() [Internal]
 // - TabItemLabelAndCloseButton() [Internal]
 //-------------------------------------------------------------------------
 
@@ -6576,7 +6596,7 @@ bool    ImGui::TabItemEx(ImGuiTabBar* tab_bar, const char* label, bool* p_open, 
         // Enlarge tab display when hovering
         bb.Max.x = bb.Min.x + (float)(int)ImLerp(bb.GetWidth(), tab->WidthContents, ImSaturate((g.HoveredIdNotActiveTimer - 0.40f) * 6.0f));
         display_draw_list = GetOverlayDrawList(window);
-        TabItemRenderBackground(display_draw_list, bb, flags, GetColorU32(ImGuiCol_TitleBgActive));
+        TabItemBackground(display_draw_list, bb, flags, GetColorU32(ImGuiCol_TitleBgActive));
     }
 #endif
 
@@ -6661,16 +6681,21 @@ void ImGui::TabItemBackground(ImDrawList* draw_list, const ImRect& bb, ImGuiTabI
     IM_UNUSED(flags);
     IM_ASSERT(width > 0.0f);
     const float rounding = ImMax(0.0f, ImMin(g.Style.TabRounding, width * 0.5f - 1.0f));
-    float y1 = bb.Min.y + 1.0f;
-    float y2 = bb.Max.y + ((flags & ImGuiTabItemFlags_Preview) ? 0.0f : -1.0f);
+    const float y1 = bb.Min.y + 1.0f;
+    const float y2 = bb.Max.y + ((flags & ImGuiTabItemFlags_Preview) ? 0.0f : -1.0f);
     draw_list->PathLineTo(ImVec2(bb.Min.x, y2));
     draw_list->PathArcToFast(ImVec2(bb.Min.x + rounding, y1 + rounding), rounding, 6, 9);
     draw_list->PathArcToFast(ImVec2(bb.Max.x - rounding, y1 + rounding), rounding, 9, 12);
     draw_list->PathLineTo(ImVec2(bb.Max.x, y2));
-    draw_list->AddConvexPolyFilled(draw_list->_Path.Data, draw_list->_Path.Size, col);
+    draw_list->PathFillConvex(col);
     if (g.Style.TabBorderSize > 0.0f)
-        draw_list->AddPolyline(draw_list->_Path.Data, draw_list->_Path.Size, GetColorU32(ImGuiCol_Border), false, g.Style.TabBorderSize);
-    draw_list->PathClear();
+    {
+        draw_list->PathLineTo(ImVec2(bb.Min.x + 0.5f, y2));
+        draw_list->PathArcToFast(ImVec2(bb.Min.x + rounding + 0.5f, y1 + rounding + 0.5f), rounding, 6, 9);
+        draw_list->PathArcToFast(ImVec2(bb.Max.x - rounding - 0.5f, y1 + rounding + 0.5f), rounding, 9, 12);
+        draw_list->PathLineTo(ImVec2(bb.Max.x - 0.5f, y2));
+        draw_list->PathStroke(GetColorU32(ImGuiCol_Border), false, g.Style.TabBorderSize);
+    }
 }
 
 // Render text label (with custom clipping) + Unsaved Document marker + Close Button logic
